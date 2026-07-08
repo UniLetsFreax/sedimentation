@@ -2,12 +2,30 @@ import json
 import os
 import socket
 import subprocess
+import threading
 import time
 from datetime import datetime
 
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", "5001"))
 DATA_DIR = "/data/measurements"
+measurement_lock = threading.Lock()
+measurement_status = {
+    "active": False,
+    "measurement_id": None,
+    "images_captured": 0,
+    "total_images": 0
+}
+
+
+def update_measurement_status(**changes):
+    with measurement_lock:
+        measurement_status.update(changes)
+
+
+def get_measurement_status():
+    with measurement_lock:
+        return dict(measurement_status)
 
 
 def send_json(connection, data):
@@ -45,42 +63,61 @@ def run_measurement(connection, images_per_minute, total_images):
     measurement_dir = os.path.join(DATA_DIR, measurement_id)
     os.makedirs(measurement_dir, exist_ok=True)
 
-    send_json(connection, {
-        "status": "measurement_started",
-        "measurement_id": measurement_id,
-        "images_per_minute": images_per_minute,
-        "total_images": total_images,
-        "interval_seconds": interval_seconds,
-        "duration_seconds": duration_seconds
-    })
+    with measurement_lock:
+        if measurement_status["active"]:
+            send_json(connection, {
+                "status": "error",
+                "message": "measurement_already_active"
+            })
+            return
 
-    start_time = time.monotonic()
+        measurement_status.update(
+            active=True,
+            measurement_id=measurement_id,
+            images_captured=0,
+            total_images=total_images
+        )
 
-    for image_number in range(1, total_images + 1):
-        planned_time = start_time + ((image_number - 1) * interval_seconds)
-
-        sleep_time = planned_time - time.monotonic()
-        if sleep_time > 0:
-            time.sleep(sleep_time)
-
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        filename = f"image_{image_number:04d}_{timestamp}.jpg"
-        output_path = os.path.join(measurement_dir, filename)
-
-        capture_image(output_path)
-
+    try:
         send_json(connection, {
-            "status": "image_captured",
-            "image_number": image_number,
+            "status": "measurement_started",
+            "measurement_id": measurement_id,
+            "images_per_minute": images_per_minute,
             "total_images": total_images,
-            "filename": filename
+            "interval_seconds": interval_seconds,
+            "duration_seconds": duration_seconds
         })
 
-    send_json(connection, {
-        "status": "measurement_finished",
-        "measurement_id": measurement_id,
-        "images_captured": total_images
-    })
+        start_time = time.monotonic()
+
+        for image_number in range(1, total_images + 1):
+            planned_time = start_time + ((image_number - 1) * interval_seconds)
+
+            sleep_time = planned_time - time.monotonic()
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            filename = f"image_{image_number:04d}_{timestamp}.jpg"
+            output_path = os.path.join(measurement_dir, filename)
+
+            capture_image(output_path)
+            update_measurement_status(images_captured=image_number)
+
+            send_json(connection, {
+                "status": "image_captured",
+                "image_number": image_number,
+                "total_images": total_images,
+                "filename": filename
+            })
+
+        send_json(connection, {
+            "status": "measurement_finished",
+            "measurement_id": measurement_id,
+            "images_captured": total_images
+        })
+    finally:
+        update_measurement_status(active=False)
 
 
 def handle_connection(connection):
@@ -95,8 +132,17 @@ def handle_connection(connection):
         data += chunk
 
     request = json.loads(data.split(b"\n", 1)[0].decode("utf-8"))
+    command = request.get("command")
 
-    if request.get("command") != "start_measurement":
+    if command == "status":
+        status = get_measurement_status()
+        send_json(connection, {
+            "status": "ok",
+            "measurement": status
+        })
+        return
+
+    if command != "start_measurement":
         send_json(connection, {
             "status": "error",
             "message": "unknown_command"
@@ -120,6 +166,25 @@ def handle_connection(connection):
     )
 
 
+
+def handle_client(connection, address):
+    with connection:
+        print(f"Verbindung von {address}", flush=True)
+
+        try:
+            handle_connection(connection)
+        except Exception as error:
+            print(f"Fehler: {error}", flush=True)
+
+            try:
+                send_json(connection, {
+                    "status": "error",
+                    "message": str(error)
+                })
+            except Exception:
+                pass
+
+
 os.makedirs(DATA_DIR, exist_ok=True)
 
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
@@ -132,18 +197,8 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
     while True:
         connection, address = server.accept()
 
-        with connection:
-            print(f"Verbindung von {address}", flush=True)
-
-            try:
-                handle_connection(connection)
-            except Exception as error:
-                print(f"Fehler: {error}", flush=True)
-
-                try:
-                    send_json(connection, {
-                        "status": "error",
-                        "message": str(error)
-                    })
-                except Exception:
-                    pass
+        threading.Thread(
+            target=handle_client,
+            args=(connection, address),
+            daemon=True
+        ).start()
