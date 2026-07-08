@@ -1,0 +1,10 @@
+services:
+  camera-capture:
+    image: camera-capture
+    container_name: camera-capture-server
+    restart: unless-stopped
+    network_mode: host
+    devices:
+      - /dev/video0:/dev/video1
+    volumes:
+      - /mnt/camera-storage/measurements:/data/measurements
