@@ -1,5 +1,6 @@
 services:
   camera-capture:
+    build: .
     image: camera-capture
     container_name: camera-capture-server
     restart: unless-stopped
