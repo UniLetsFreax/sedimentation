@@ -9,3 +9,4 @@ services:
       - /dev/video0:/dev/video1
     volumes:
       - /mnt/camera-storage/measurements:/data/measurements
+      - /mnt/camera-storage/image-processing-tests/measurements:/data/test-images:ro
