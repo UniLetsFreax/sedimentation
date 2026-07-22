@@ -344,6 +344,7 @@ def build_telemetry(status):
         "measurement_id": measurement.get("measurement_id"),
         "measurement_images_captured": measurement.get("images_captured", 0),
         "measurement_total_images": measurement.get("total_images", 0),
+        "measurement_test_mode": measurement.get("test_mode", 0),
         "stored_measurements_total": measurement_storage.get("total_measurements", 0),
         "stored_images_total": measurement_storage.get("total_images", 0),
 
