@@ -1,0 +1,41 @@
+input:
+  measurements_dir: /data/measurements
+  image_extensions:
+    - .jpg
+    - .jpeg
+    - .png
+
+output:
+  results_dir: /data/results
+  save_debug_images: true
+
+processing:
+  poll_interval_seconds: 1
+  file_stable_age_seconds: 2
+  minimum_images_for_velocity: 2
+
+calibration:
+  configured: false
+  millimeters_per_pixel: null
+
+roi:
+  configured: false
+  x: 0
+  y: 0
+  width: 0
+  height: 0
+
+contrast:
+  clear_region_fraction: 0.20
+  turbid_region_fraction: 0.20
+
+particles:
+  minimum_area_pixels: 5
+  maximum_area_pixels: 5000
+  background_kernel_pixels: 31
+  local_contrast_threshold: 20
+  maximum_dimension_pixels: 100
+  maximum_aspect_ratio: 3.5
+
+velocity:
+  maximum_tracking_distance_pixels: 100

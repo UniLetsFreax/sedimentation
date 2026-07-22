@@ -1,1 +1,33 @@
+# Python
 __pycache__/
+*.py[cod]
+
+# Backups und temporäre Dateien
+*.bak
+*.bak-*
+*.tmp
+*~
+.vscode/
+
+# Laufzeitdaten und Ergebnisse
+output/
+results/
+measurements/
+image-processing-results/
+processed_state.json
+latest_analysis.json
+*.jpg
+*.jpeg
+*.png
+
+# Zugangsdaten und lokale Konfiguration
+*.env
+.env
+board-agent.env
+
+# Docker-Laufzeitdaten
+docker-data/
+
+# Betriebssystem
+.DS_Store
+Thumbs.db

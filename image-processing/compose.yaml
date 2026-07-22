@@ -1,0 +1,13 @@
+services:
+  image-processing:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: image-processing
+    container_name: image-processing-server
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - /mnt/camera-storage/measurements:/data/measurements:ro
+      - /mnt/camera-storage/image-processing-results:/data/results
+      - ./config:/config:ro
