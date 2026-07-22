@@ -97,6 +97,33 @@ def create_measurement_directory():
     raise RuntimeError("unable_to_create_unique_measurement_directory")
 
 
+def write_measurement_metadata(measurement_dir, metadata):
+    metadata["updated_at"] = (
+        datetime.now().astimezone().isoformat()
+    )
+
+    final_path = os.path.join(
+        measurement_dir,
+        "measurement.json",
+    )
+    temporary_path = final_path + ".tmp"
+
+    with open(
+        temporary_path,
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            metadata,
+            file,
+            indent=2,
+            ensure_ascii=False,
+        )
+        file.write("\n")
+
+    os.replace(temporary_path, final_path)
+
+
 def run_measurement(
     connection,
     images_per_minute,
@@ -138,6 +165,25 @@ def run_measurement(
             total_images=total_images,
             test_mode=test_mode,
         )
+
+    metadata = {
+        "measurement_id": measurement_id,
+        "status": "running",
+        "mode": "camera" if test_mode == 0 else "test",
+        "test_mode": test_mode,
+        "images_per_minute": images_per_minute,
+        "interval_seconds": interval_seconds,
+        "duration_seconds": duration_seconds,
+        "total_images": total_images,
+        "images_captured": 0,
+        "started_at": datetime.now().astimezone().isoformat(),
+        "finished_at": None,
+        "error": None,
+    }
+    write_measurement_metadata(
+        measurement_dir,
+        metadata,
+    )
 
     try:
         send_json(connection, {
@@ -185,6 +231,12 @@ def run_measurement(
                 images_captured=image_number
             )
 
+            metadata["images_captured"] = image_number
+            write_measurement_metadata(
+                measurement_dir,
+                metadata,
+            )
+
             send_json(connection, {
                 "status": "image_captured",
                 "image_number": image_number,
@@ -193,15 +245,39 @@ def run_measurement(
                 "test_mode": test_mode,
             })
 
+        metadata.update(
+            status="finished",
+            images_captured=total_images,
+            finished_at=(
+                datetime.now().astimezone().isoformat()
+            ),
+        )
+        write_measurement_metadata(
+            measurement_dir,
+            metadata,
+        )
+
         send_json(connection, {
             "status": "measurement_finished",
             "measurement_id": measurement_id,
             "images_captured": total_images,
             "test_mode": test_mode,
         })
+    except Exception as error:
+        metadata.update(
+            status="failed",
+            finished_at=(
+                datetime.now().astimezone().isoformat()
+            ),
+            error=str(error),
+        )
+        write_measurement_metadata(
+            measurement_dir,
+            metadata,
+        )
+        raise
     finally:
         update_measurement_status(active=False)
-
 
 def handle_connection(connection):
     data = b""

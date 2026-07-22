@@ -83,6 +83,37 @@ def get_latest_image():
 
 
 
+
+def get_latest_measurement_metadata():
+    try:
+        base = Path(MEASUREMENTS_PATH)
+        metadata_files = list(base.glob("*/measurement.json"))
+
+        if not metadata_files:
+            return {
+                "available": False,
+                "measurement_id": None,
+            }
+
+        latest = max(
+            metadata_files,
+            key=lambda item: item.stat().st_mtime,
+        )
+
+        with latest.open("r", encoding="utf-8") as file:
+            metadata = json.load(file)
+
+        metadata["available"] = True
+        metadata["path"] = str(latest)
+        return metadata
+
+    except Exception as error:
+        return {
+            "available": False,
+            "measurement_id": None,
+            "error": str(error),
+        }
+
 def get_latest_processed_image():
     try:
         base = Path(PROCESSED_RESULTS_PATH)
@@ -324,6 +355,7 @@ def build_telemetry(status):
     image_processing_container = status["docker"].get("image-processing", {})
     latest_image = status["latest_image"]
     latest_processed_image = status["latest_processed_image"]
+    latest_measurement = status["latest_measurement"]
     measurement_storage = status["measurement_storage"]
     latest_analysis = status["latest_analysis"]
     analysis_summary = latest_analysis.get("summary", {})
@@ -344,7 +376,36 @@ def build_telemetry(status):
         "measurement_id": measurement.get("measurement_id"),
         "measurement_images_captured": measurement.get("images_captured", 0),
         "measurement_total_images": measurement.get("total_images", 0),
-        "measurement_test_mode": measurement.get("test_mode", 0),
+        "measurement_test_mode": measurement.get(
+            "test_mode",
+            latest_measurement.get("test_mode", 0),
+        ),
+
+        "latest_measurement_metadata_available": latest_measurement.get(
+            "available",
+            False,
+        ),
+        "latest_measurement_metadata_id": latest_measurement.get(
+            "measurement_id"
+        ),
+        "latest_measurement_status": latest_measurement.get("status"),
+        "latest_measurement_mode": latest_measurement.get("mode"),
+        "latest_measurement_test_mode": latest_measurement.get("test_mode"),
+        "latest_measurement_images_per_minute": latest_measurement.get(
+            "images_per_minute"
+        ),
+        "latest_measurement_interval_seconds": latest_measurement.get(
+            "interval_seconds"
+        ),
+        "latest_measurement_total_images": latest_measurement.get(
+            "total_images"
+        ),
+        "latest_measurement_images_captured": latest_measurement.get(
+            "images_captured"
+        ),
+        "latest_measurement_started_at": latest_measurement.get("started_at"),
+        "latest_measurement_finished_at": latest_measurement.get("finished_at"),
+
         "stored_measurements_total": measurement_storage.get("total_measurements", 0),
         "stored_images_total": measurement_storage.get("total_images", 0),
 
@@ -460,6 +521,7 @@ def collect_status():
         "storage": get_storage_status(),
         "latest_image": get_latest_image(),
         "latest_processed_image": get_latest_processed_image(),
+        "latest_measurement": get_latest_measurement_metadata(),
         "latest_analysis": get_latest_analysis(),
         "measurement_storage": get_measurement_storage_status(),
         "camera": get_camera_status(),
