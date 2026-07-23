@@ -5,6 +5,7 @@ import socket
 import shutil
 import subprocess
 import time
+import threading
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -513,6 +514,276 @@ def send_to_thingsboard(telemetry):
         }
 
 
+
+RPC_POLL_TIMEOUT_MS = int(
+    os.environ.get("RPC_POLL_TIMEOUT_MS", "20000")
+)
+RPC_HTTP_TIMEOUT_SECONDS = int(
+    os.environ.get("RPC_HTTP_TIMEOUT_SECONDS", "30")
+)
+RPC_CAMERA_START_TIMEOUT_SECONDS = int(
+    os.environ.get("RPC_CAMERA_START_TIMEOUT_SECONDS", "10")
+)
+
+
+def poll_rpc_request():
+    url = (
+        f"{THINGSBOARD_URL}/api/v1/"
+        f"{THINGSBOARD_TOKEN}/rpc"
+        f"?timeout={RPC_POLL_TIMEOUT_MS}"
+    )
+
+    request = urllib.request.Request(
+        url,
+        method="GET",
+    )
+
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=RPC_HTTP_TIMEOUT_SECONDS,
+        ) as response:
+            body = response.read().decode("utf-8").strip()
+
+        if not body:
+            return None
+
+        return json.loads(body)
+
+    except urllib.error.HTTPError as error:
+        if error.code in (408, 504):
+            return None
+        raise
+
+
+def send_rpc_reply(request_id, result):
+    url = (
+        f"{THINGSBOARD_URL}/api/v1/"
+        f"{THINGSBOARD_TOKEN}/rpc/{request_id}"
+    )
+    payload = json.dumps(result).encode("utf-8")
+
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    with urllib.request.urlopen(
+        request,
+        timeout=10,
+    ) as response:
+        response.read()
+
+
+def camera_measurement_worker(
+    request_payload,
+    first_response,
+    response_ready,
+):
+    try:
+        with socket.create_connection(
+            (HOST, PORT),
+            timeout=10,
+        ) as sock:
+            message = (
+                json.dumps(request_payload)
+                + "\n"
+            ).encode("utf-8")
+            sock.sendall(message)
+
+            with sock.makefile(
+                "r",
+                encoding="utf-8",
+            ) as stream:
+                for line in stream:
+                    line = line.strip()
+
+                    if not line:
+                        continue
+
+                    response = json.loads(line)
+
+                    print(
+                        json.dumps(
+                            {"camera_rpc": response},
+                            ensure_ascii=False,
+                        ),
+                        flush=True,
+                    )
+
+                    if not response_ready.is_set():
+                        first_response["value"] = response
+                        response_ready.set()
+
+                if not response_ready.is_set():
+                    first_response["value"] = {
+                        "status": "error",
+                        "message": "camera_closed_without_response",
+                    }
+                    response_ready.set()
+
+    except Exception as error:
+        if not response_ready.is_set():
+            first_response["value"] = {
+                "status": "error",
+                "message": str(error),
+            }
+            response_ready.set()
+        else:
+            print(
+                json.dumps({
+                    "camera_rpc_error": str(error),
+                }),
+                flush=True,
+            )
+
+
+def start_measurement_rpc(params):
+    if isinstance(params, str):
+        try:
+            params = json.loads(params)
+        except json.JSONDecodeError:
+            return {
+                "status": "error",
+                "message": "params_must_be_valid_json",
+            }
+
+    if not isinstance(params, dict):
+        return {
+            "status": "error",
+            "message": "params_must_be_object",
+        }
+
+    try:
+        images_per_minute = float(
+            params.get("images_per_minute")
+        )
+        total_images = int(
+            params.get("total_images")
+        )
+        test_mode = int(
+            params.get("test_mode", 0)
+        )
+    except (TypeError, ValueError):
+        return {
+            "status": "error",
+            "message": "invalid_parameter_types",
+        }
+
+    if images_per_minute <= 0 or total_images <= 0:
+        return {
+            "status": "error",
+            "message": "values_must_be_greater_than_zero",
+        }
+
+    if test_mode not in (0, 1):
+        return {
+            "status": "error",
+            "message": "test_mode_must_be_0_or_1",
+        }
+
+    request_payload = {
+        "command": "start_measurement",
+        "images_per_minute": images_per_minute,
+        "total_images": total_images,
+        "test_mode": test_mode,
+    }
+
+    first_response = {}
+    response_ready = threading.Event()
+
+    thread = threading.Thread(
+        target=camera_measurement_worker,
+        args=(
+            request_payload,
+            first_response,
+            response_ready,
+        ),
+        name="camera-measurement-rpc",
+        daemon=True,
+    )
+    thread.start()
+
+    if not response_ready.wait(
+        RPC_CAMERA_START_TIMEOUT_SECONDS
+    ):
+        return {
+            "status": "error",
+            "message": "camera_start_timeout",
+        }
+
+    return first_response.get(
+        "value",
+        {
+            "status": "error",
+            "message": "missing_camera_response",
+        },
+    )
+
+
+def handle_rpc_request(request):
+    method = request.get("method")
+    params = request.get("params", {})
+
+    if method == "start_measurement":
+        return start_measurement_rpc(params)
+
+    if method == "get_measurement_status":
+        return get_camera_status()
+
+    return {
+        "status": "error",
+        "message": "unknown_rpc_method",
+        "method": method,
+    }
+
+
+def rpc_loop():
+    print(
+        json.dumps({
+            "thingsboard_rpc": "started",
+        }),
+        flush=True,
+    )
+
+    while True:
+        try:
+            request = poll_rpc_request()
+
+            if not request:
+                continue
+
+            result = handle_rpc_request(request)
+            request_id = request.get("id")
+
+            if request_id is not None:
+                send_rpc_reply(
+                    request_id,
+                    result,
+                )
+
+            print(
+                json.dumps({
+                    "thingsboard_rpc_request": {
+                        "id": request_id,
+                        "method": request.get("method"),
+                    },
+                    "thingsboard_rpc_result": result,
+                }, ensure_ascii=False),
+                flush=True,
+            )
+
+        except Exception as error:
+            print(
+                json.dumps({
+                    "thingsboard_rpc_error": str(error),
+                }),
+                flush=True,
+            )
+            time.sleep(5)
+
 def collect_status():
     status = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -536,6 +807,17 @@ def collect_status():
 
 
 def main():
+    if (
+        THINGSBOARD_ENABLED
+        and THINGSBOARD_URL
+        and THINGSBOARD_TOKEN
+    ):
+        threading.Thread(
+            target=rpc_loop,
+            name="thingsboard-rpc",
+            daemon=True,
+        ).start()
+
     while True:
         status = collect_status()
 
