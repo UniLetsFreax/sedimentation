@@ -19,6 +19,9 @@ STORAGE_PATH = os.environ.get("STORAGE_PATH", "/mnt/camera-storage")
 MEASUREMENTS_PATH = os.environ.get("MEASUREMENTS_PATH", "/mnt/camera-storage/measurements")
 PROCESSED_RESULTS_PATH = os.environ.get("PROCESSED_RESULTS_PATH", "/mnt/camera-storage/image-processing-results")
 INTERVAL_SECONDS = int(os.environ.get("INTERVAL_SECONDS", "10"))
+FULL_TELEMETRY_INTERVAL_SECONDS = int(
+    os.environ.get("FULL_TELEMETRY_INTERVAL_SECONDS", "30")
+)
 
 THINGSBOARD_ENABLED = os.environ.get("THINGSBOARD_ENABLED", "false").lower() == "true"
 THINGSBOARD_URL = os.environ.get("THINGSBOARD_URL", "").rstrip("/")
@@ -31,6 +34,21 @@ MONITORED_CONTAINERS = {
 
 LAST_SENT_IMAGE_PATH = None
 LAST_SENT_PROCESSED_IMAGE_PATH = None
+LAST_FULL_TELEMETRY_TIME = 0.0
+LAST_FULL_TELEMETRY_SNAPSHOT = None
+
+HEARTBEAT_TELEMETRY_KEYS = (
+    "board_id",
+    "health",
+    "issue_count",
+    "uptime_seconds",
+    "camera_status",
+    "measurement_active",
+    "measurement_id",
+    "measurement_images_captured",
+    "measurement_total_images",
+    "measurement_test_mode",
+)
 
 
 def get_uptime_seconds():
@@ -353,7 +371,6 @@ def build_telemetry(status):
     measurement = status["camera"].get("measurement", {})
     camera_container = status["docker"].get("camera-capture", {})
     image_processing_container = status["docker"].get("image-processing", {})
-    image_processing_container = status["docker"].get("image-processing", {})
     latest_image = status["latest_image"]
     latest_processed_image = status["latest_processed_image"]
     latest_measurement = status["latest_measurement"]
@@ -437,8 +454,6 @@ def build_telemetry(status):
         "docker_camera_capture_restart_count": camera_container.get("restart_count"),
         "docker_image_processing_status": image_processing_container.get("status"),
         "docker_image_processing_restart_count": image_processing_container.get("restart_count"),
-        "docker_image_processing_status": image_processing_container.get("status"),
-        "docker_image_processing_restart_count": image_processing_container.get("restart_count"),
     }
 
     image_data_url = build_image_data_url_if_new(latest_image)
@@ -454,6 +469,44 @@ def build_telemetry(status):
         telemetry["processed_image_data_url"] = processed_image_data_url
 
     return telemetry
+
+
+def prepare_telemetry_payload(telemetry):
+    now = time.monotonic()
+
+    full_snapshot = {
+        key: value
+        for key, value in telemetry.items()
+        if key not in HEARTBEAT_TELEMETRY_KEYS
+        and key not in (
+            "latest_image_data_url",
+            "processed_image_data_url",
+        )
+    }
+
+    contains_new_image = (
+        "latest_image_data_url" in telemetry
+        or "processed_image_data_url" in telemetry
+    )
+
+    full_telemetry_due = (
+        LAST_FULL_TELEMETRY_SNAPSHOT is None
+        or full_snapshot != LAST_FULL_TELEMETRY_SNAPSHOT
+        or now - LAST_FULL_TELEMETRY_TIME
+        >= FULL_TELEMETRY_INTERVAL_SECONDS
+        or contains_new_image
+    )
+
+    if full_telemetry_due:
+        return telemetry, "full", full_snapshot, now
+
+    heartbeat = {
+        key: telemetry[key]
+        for key in HEARTBEAT_TELEMETRY_KEYS
+        if key in telemetry
+    }
+
+    return heartbeat, "heartbeat", None, None
 
 
 def send_to_thingsboard(telemetry):
@@ -785,6 +838,9 @@ def rpc_loop():
             time.sleep(5)
 
 def collect_status():
+    global LAST_FULL_TELEMETRY_TIME
+    global LAST_FULL_TELEMETRY_SNAPSHOT
+
     status = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "board_id": BOARD_ID,
@@ -800,8 +856,25 @@ def collect_status():
     }
 
     status["health"], status["issues"] = calculate_health(status)
-    status["telemetry"] = build_telemetry(status)
-    status["thingsboard"] = send_to_thingsboard(status["telemetry"])
+
+    full_telemetry = build_telemetry(status)
+    (
+        telemetry_to_send,
+        telemetry_mode,
+        full_snapshot,
+        full_sent_time,
+    ) = prepare_telemetry_payload(full_telemetry)
+
+    status["telemetry"] = full_telemetry
+    status["thingsboard"] = send_to_thingsboard(telemetry_to_send)
+    status["thingsboard"]["telemetry_mode"] = telemetry_mode
+
+    if (
+        status["thingsboard"].get("sent")
+        and telemetry_mode == "full"
+    ):
+        LAST_FULL_TELEMETRY_SNAPSHOT = full_snapshot
+        LAST_FULL_TELEMETRY_TIME = full_sent_time
 
     return status
 
